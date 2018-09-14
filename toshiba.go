@@ -66,12 +66,11 @@ const (
 const NoChecksum = uint8(0x60)
 
 func sendModeFanTemp(unit unitType, mode modeType, specialMode specialModeType, fan fanType, tempCelsius uint32) error {
-//			abcd efgh ijkl mnop qrst uvwx yz23 4567		checksum - dec
-//23 deg	0000 0001 0110 0000 0000 0001 0000 0000		0110 0000 - 96
+//          abcd efgh ijkl mnop qrst uvwx yz23 4567     checksum - dec
+//23 deg    0000 0001 0110 0000 0000 0001 0000 0000     0110 0000 - 96
 //                    ijkl - temp above 17 (so 0000 is 17)
 //                                    vwx – 000:auto, 001:cooling, 010:drying, 011:heating, 111:pwroff
 //               efgh - special mode bits (1 - normal mode, 9 - hipower or eco depending on endByte)
-//
 
 	specialModeBits := uint32(1)
 	if specialMode != NoSpecialMode {
