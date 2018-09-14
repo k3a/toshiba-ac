@@ -112,5 +112,5 @@ func sendSwing(unit unitType) error {
 }
 
 func main() {
-	sendModeFanTemp(UnitA, PwrOffMode, NoSpecialMode, FanAuto, 23)
+	sendModeFanTemp(UnitA, CoolingMode, NoSpecialMode, FanAuto, 23)
 }
