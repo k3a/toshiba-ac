@@ -1,0 +1,4 @@
+build:
+	CGO_ENABLED=0 go build
+	strip toshiba-ac
+

@@ -16,7 +16,7 @@ Complete IR data format
 first 32bits     second 32bits (payload)  payload checksum
 0xAABBCCDD       0xEEEEEEEE               0xFF
 
-AABB = always 0xF20D0
+AABB = always 0xF20D
 CC = actual command
 DD = xor checksum  (AA ^ BB ^ CC)
 
