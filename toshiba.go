@@ -5,15 +5,62 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
+	"strings"
+
+	"github.com/alexflint/go-arg"
 )
+
+// AuthMiddleware is a middleware function that checks for Basic Auth or Bearer Token
+func AuthMiddleware(password string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+
+		if password != "" && strings.HasPrefix(authHeader, "Basic ") {
+			// Handle Basic Auth
+			payload := strings.TrimPrefix(authHeader, "Basic ")
+			decoded, err := decodeBase64(payload)
+			if err != nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// The decoded string is in the format "username:password"
+			parts := strings.SplitN(decoded, ":", 2)
+			if len(parts) != 2 || parts[1] != password {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		} else if password != "" && strings.HasPrefix(authHeader, "Bearer ") {
+			// Handle Bearer Token
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			if token != password {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// If we reach here, authentication was successful
+		next.ServeHTTP(w, r)
+	}
+}
+
+// decodeBase64 decodes a base64 encoded string
+func decodeBase64(encoded string) (string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", err
+	}
+	return string(decoded), nil
+}
 
 func makeBit(val bool) string {
 	if val {
@@ -37,7 +84,7 @@ func makeCmdRaw(cmd uint32, state uint32, endByte uint8) (string, error) {
 	prefix |= ((prefix >> 24) & 0xFF) ^ ((prefix >> 16) & 0xFF) ^ ((prefix >> 8) & 0xFF)
 
 	// print command parts
-	fmt.Printf("0x%08X 0x%08X 0x%02X\n", prefix, state&0xFFFFFFFF, endByte&0xFF)
+	log.Printf("0x%08X 0x%08X 0x%02X\n", prefix, state&0xFFFFFFFF, endByte&0xFF)
 
 	// construct pulse output
 	out := "+4496 -4414 " // header
@@ -167,6 +214,8 @@ func parseMode(inmode string) (modeType, error) {
 	return mode, nil
 }
 
+var eco bool
+
 func handleSet(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -184,36 +233,36 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		Eco         bool   `json:"eco"`
 	}
 
-	err := json.NewDecoder(r.Body).Decode(&req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	mode, err := parseMode(req.Mode)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
+	pulses := ""
+	var mode modeType
 	specMode := NoSpecialMode
-	if req.HiPower {
-		specMode = HiPowerSpecialMode
-	} else if *eco {
-		specMode = EcoSpecialMode
-	}
-
 	var f *os.File
+	var cmd *exec.Cmd
 
-	pulses, err := makeModeFanTemp(unitType(req.Unit), mode, specMode, fanType(req.Fan), uint32(req.Temperature))
+	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		goto errRes
 	}
 
-	f, err = ioutil.TempFile("", "toshiba-ac")
+	mode, err = parseMode(req.Mode)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		goto errRes
+	}
+
+	if req.HiPower {
+		specMode = HiPowerSpecialMode
+	} else if eco {
+		specMode = EcoSpecialMode
+	}
+
+	pulses, err = makeModeFanTemp(unitType(req.Unit), mode, specMode, fanType(req.Fan), uint32(req.Temperature))
+	if err != nil {
+		goto errRes
+	}
+
+	f, err = os.CreateTemp("", "toshiba-ac")
+	if err != nil {
+		goto errRes
 	}
 	defer f.Close()
 	defer os.Remove(f.Name())
@@ -223,87 +272,92 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 		goto errRes
 	}
 
-	err = exec.Command("ir-ctl", "-s", f.Name()).Run()
+	cmd = exec.Command("ir-ctl", "-s", f.Name())
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	err = cmd.Run()
+	if err != nil {
+		err = fmt.Errorf("error running ir-ctl -s %s: %v", f.Name(), err)
+	}
 
 errRes:
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("ERROR: %v\n", err)
 		return
 	}
 }
 
-var (
-	unit    = flag.Int("unit", 0, "unit to address (0-A, 1-B)")
-	hipower = flag.Bool("hipower", false, "Enable Hi-Power mode")
-	eco     = flag.Bool("eco", false, "Enable Eco mode")
-	fan     = flag.Int("fan", 0, "Set fan speed (0=auto)")
-	host    = flag.String("host", "127.0.0.1", "IP to listen on")
-	port    = flag.Int("port", 1958, "Port to listen on")
-)
+type FanTempCmd struct {
+	Mode string `arg:"positional,required"`
+	Temp int    `arg:"positional,required"`
+}
 
-func usage(cmd string) {
-	if cmd == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s <serve|fantemp|fix|swing> [--unit NUM] ...\n", os.Args[0])
-	} else if cmd == "fantemp" {
-		fmt.Fprintf(os.Stderr, "Usage: %s fantemp <auto|cooling|drying|heating|poweroff> <TEMP-DEG> [-unit NUM] [-fan FAN] [-hipower|-eco]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "       FAN is 0 for Auto or a number between 2 and 6 inclusive\n")
-	} else if cmd == "serve" {
-		fmt.Fprintf(os.Stderr, "Usage: %s serve [-listen IP] [-port PORT]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "       FAN is 0 for Auto or a number between 2 and 6 inclusive\n")
-	}
-	os.Exit(1)
+type ServeCmd struct {
+	Host string `arg:"--host" default:"127.0.0.1"`
+	Port int    `arg:"--port" default:"1958"`
+	Auth string `arg:"--auth"`
+}
+
+type FixCmd struct {
+}
+
+type SwingCmd struct {
+}
+
+var args struct {
+	FanTemp *FanTempCmd `arg:"subcommand:fantemp"`
+	Serve   *ServeCmd   `arg:"subcommand:serve"`
+	Fix     *FixCmd     `arg:"subcommand:fix"`
+	Swing   *SwingCmd   `arg:"subcommand:swing"`
+	Unit    int         `arg:"--unit" default:"0"`
+	HiPower bool        `arg:"--hipower"`
+	Eco     bool        `arg:"--eco"`
+	Fan     int         `arg:"--fan" default:"0"`
 }
 
 func main() {
-	flag.Parse()
-
-	if len(os.Args) < 2 {
-		usage("")
-		return
-	}
+	arg.MustParse(&args)
 
 	var err error
 
-	if os.Args[1] == "fix" {
-		_, err = makeFix(unitType(*unit))
-	} else if os.Args[1] == "swing" {
-		_, err = makeSwing(unitType(*unit))
-	} else if os.Args[1] == "serve" {
-		http.HandleFunc("/set", handleSet)
-		listen := fmt.Sprintf("%s:%d", *host, *port)
-		fmt.Fprintf(os.Stdout, "listening on %s\n", listen)
+	switch {
+	case args.Fix != nil:
+		_, err = makeFix(unitType(args.Unit))
+	case args.Swing != nil:
+		_, err = makeSwing(unitType(args.Unit))
+	case args.Serve != nil:
+		eco = args.Eco
+		http.HandleFunc("/set", AuthMiddleware(args.Serve.Auth, handleSet))
+		listen := fmt.Sprintf("%s:%d", args.Serve.Host, args.Serve.Port)
+		log.Printf("listening on %s\n", listen)
 		err := http.ListenAndServe(listen, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			return
 		}
-
-	} else {
-		if len(os.Args) < 4 {
-			usage(os.Args[1])
-			return
-		}
-
-		mode, err := parseMode(os.Args[2])
+	case args.FanTemp != nil:
+		var mode modeType
+		mode, err = parseMode(args.FanTemp.Mode)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 			return
 		}
 
 		var specMode = NoSpecialMode
-		if *hipower {
+		if args.HiPower {
 			specMode = HiPowerSpecialMode
-		} else if *eco {
+		} else if args.Eco {
 			specMode = EcoSpecialMode
 		}
 
-		temp, err := strconv.Atoi(os.Args[3])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-			return
-		}
-
-		_, err = makeModeFanTemp(unitType(*unit), mode, specMode, fanType(*fan), uint32(temp))
+		_, err = makeModeFanTemp(
+			unitType(args.Unit),
+			mode,
+			specMode,
+			fanType(args.Fan),
+			uint32(args.FanTemp.Temp),
+		)
 	}
 
 	if err != nil {
@@ -311,3 +365,4 @@ func main() {
 		return
 	}
 }
+
