@@ -214,8 +214,6 @@ func parseMode(inmode string) (modeType, error) {
 	return mode, nil
 }
 
-var eco bool
-
 func handleSet(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
@@ -251,7 +249,7 @@ func handleSet(w http.ResponseWriter, r *http.Request) {
 
 	if req.HiPower {
 		specMode = HiPowerSpecialMode
-	} else if eco {
+	} else if req.Eco {
 		specMode = EcoSpecialMode
 	}
 
@@ -289,8 +287,11 @@ errRes:
 }
 
 type FanTempCmd struct {
-	Mode string `arg:"positional,required"`
-	Temp int    `arg:"positional,required"`
+	Mode    string `arg:"positional,required"`
+	Temp    int    `arg:"positional,required"`
+	HiPower bool   `arg:"--hipower"`
+	Eco     bool   `arg:"--eco"`
+	Fan     int    `arg:"--fan" default:"0"`
 }
 
 type ServeCmd struct {
@@ -311,13 +312,14 @@ var args struct {
 	Fix     *FixCmd     `arg:"subcommand:fix"`
 	Swing   *SwingCmd   `arg:"subcommand:swing"`
 	Unit    int         `arg:"--unit" default:"0"`
-	HiPower bool        `arg:"--hipower"`
-	Eco     bool        `arg:"--eco"`
-	Fan     int         `arg:"--fan" default:"0"`
 }
 
 func main() {
-	arg.MustParse(&args)
+	p := arg.MustParse(&args)
+
+	if p.Subcommand() == nil {
+		p.Fail("missing subcommand")
+	}
 
 	var err error
 
@@ -327,7 +329,6 @@ func main() {
 	case args.Swing != nil:
 		_, err = makeSwing(unitType(args.Unit))
 	case args.Serve != nil:
-		eco = args.Eco
 		http.HandleFunc("/set", AuthMiddleware(args.Serve.Auth, handleSet))
 		listen := fmt.Sprintf("%s:%d", args.Serve.Host, args.Serve.Port)
 		log.Printf("listening on %s\n", listen)
@@ -345,9 +346,9 @@ func main() {
 		}
 
 		var specMode = NoSpecialMode
-		if args.HiPower {
+		if args.FanTemp.HiPower {
 			specMode = HiPowerSpecialMode
-		} else if args.Eco {
+		} else if args.FanTemp.Eco {
 			specMode = EcoSpecialMode
 		}
 
@@ -355,7 +356,7 @@ func main() {
 			unitType(args.Unit),
 			mode,
 			specMode,
-			fanType(args.Fan),
+			fanType(args.FanTemp.Fan),
 			uint32(args.FanTemp.Temp),
 		)
 	}
